@@ -1,1 +1,91 @@
+import boto3 
+import logging
+from datetime import datetime, timedelta 
+import json
+import uuid 
+import os
+
+# Setup logging
+logger = logging.getLogger() 
+logger.setLevel(logging.INFO)
+
+# Define AWS clients and resource
+ec2 = boto3.resource('ec2') 
+cw = boto3.client('cloudwatch') 
+s3client = boto3.client('s3')
+
+
+
+def lambda_handler(event, context):
+    try:
+        # Define filters for EC2 instances
+        filters = [{
+            'Name': 'instance-state-name', 
+            'Values': ['running']
+        }]
+
+        # Filter instances
+        instances = ec2.instances.filter(Filters=filters)
+        
+        
+        bucketname = os.getenv('S3_BUCKET')
+
+        for instance in instances:
+            for tags in instance.tags:
+                if tags["Key"] == 'Name':
+                    ec2_instance_id = instance.id
+
+                    
+                    metrics_list_response = cw.list_metrics(
+                        Dimensions=[{'Name': 'InstanceId', 'Value': ec2_instance_id}]
+                    )
+
+                    # Get metrics data
+                    metrics_response = get_metrics(metrics_list_response, cw)
+                    metrics_response["DEVICE"] = ec2_instance_id
+                    instance_data = json.dumps(metrics_response, default=datetime_handler)
+                    filename = str(uuid.uuid4()) + "__" + ec2_instance_id + '_InstanceMetrics.json'
+                    key = ec2_instance_id + "/" + filename
+                    s3client.put_object(Bucket=bucketname, Key=key, Body=instance_data)
+
+    except Exception as e:
+        logger.exception(f"Error while getting EC2 CloudWatch metrics: {e}")
+
+def datetime_handler(x):
+    if isinstance(x, datetime):
+        return x.isoformat()
+    raise TypeError("Unknown type")
+
+def get_metrics(metrics_list_response, cw):
+    metric_data_queries = []
+    metrics = metrics_list_response.get("Metrics")
+    for metric in metrics:
+        namespace = metric.get("Namespace")
+        dimensions = metric.get("Dimensions")
+        metric_name = metric.get("MetricName")
+        metric_id = metric_name.lower()
+
+        metrics_data_query = {
+            "Id": metric_id,
+            "MetricStat": {
+                "Metric": {
+                    "Namespace": namespace,
+                    "MetricName": metric_name,
+                    "Dimensions": dimensions
+                },
+                "Period": 300,
+                "Stat": "Average"
+            },
+            "Label": metric_name + "Response",
+            "ReturnData": True
+        }
+        metric_data_queries.append(metrics_data_query)
+    metrics_response = cw.get_metric_data(
+        MetricDataQueries=metric_data_queries,
+        StartTime=datetime.now() - timedelta(minutes=5),
+        EndTime=datetime.now()
+    )
+    return metrics_response
+
+
 
